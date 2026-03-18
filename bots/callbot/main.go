@@ -115,6 +115,12 @@ func main() {
 	syncer.OnEventType(event.Type{Type: "org.matrix.msc3401.call.member", Class: event.StateEventType}, handleCallMember)
 	syncer.OnEventType(event.Type{Type: "org.matrix.msc4143.rtc.member", Class: event.StateEventType}, handleCallMember)
 
+	// Register no-op handlers for encrypted call-notify event types so the
+	// crypto layer doesn't log "unsupported event type" warnings for them.
+	noop := func(context.Context, *event.Event) {}
+	syncer.OnEventType(event.Type{Type: "org.matrix.msc4075.call.notify", Class: event.MessageEventType}, noop)
+	syncer.OnEventType(event.Type{Type: "org.matrix.msc4075.rtc.notification", Class: event.MessageEventType}, noop)
+
 	// Commands: !callbot <status|watch|announce|help>
 	syncer.OnEventType(event.EventMessage, handleCommand(zlog))
 
