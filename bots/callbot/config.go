@@ -8,8 +8,7 @@ import (
 )
 
 type botConfig struct {
-	WatchedRoom  id.RoomID `json:"watched_room"`
-	AnnounceRoom id.RoomID `json:"announce_room"`
+	WatchedRoom id.RoomID `json:"watched_room"`
 }
 
 var configPath = "config.json" // overridden by CONFIG_PATH env var in main
@@ -27,8 +26,7 @@ func loadConfig() botConfig {
 func saveConfig() {
 	mu.Lock()
 	cfg := botConfig{
-		WatchedRoom:  watchedRoom,
-		AnnounceRoom: announceRoom,
+		WatchedRoom: watchedRoom,
 	}
 	mu.Unlock()
 	data, err := json.MarshalIndent(cfg, "", "  ")

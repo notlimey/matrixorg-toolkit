@@ -5,6 +5,16 @@ services:
     env_file: .env
     volumes:
       - data:/data
+    # No ports exposed — cloudflared routes traffic internally
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TOKEN}
+    depends_on:
+      - callbot
 
 volumes:
   data:

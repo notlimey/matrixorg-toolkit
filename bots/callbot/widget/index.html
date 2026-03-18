@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Call Status</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d0f14;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 14px;
+      min-height: 100vh;
+    }
+
+    .card {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 14px;
+      padding: 18px 20px;
+    }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 14px;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #22c55e;
+      flex-shrink: 0;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.35; }
+    }
+
+    .status-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: #22c55e;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .elapsed {
+      margin-left: auto;
+      font-size: 12px;
+      color: #4b5563;
+      font-variant-numeric: tabular-nums;
+      font-weight: 500;
+    }
+
+    /* ── Body ── */
+    .room-name {
+      font-size: 16px;
+      font-weight: 600;
+      color: #f0f0f0;
+      margin-bottom: 3px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .pcount {
+      font-size: 12px;
+      color: #4b5563;
+      margin-bottom: 14px;
+    }
+
+    /* ── Avatars ── */
+    .avatars {
+      display: flex;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .avatar {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      border: 2.5px solid #161b22;
+      flex-shrink: 0;
+      margin-left: -9px;
+      transition: transform 0.15s;
+      cursor: default;
+    }
+    .avatar:first-child { margin-left: 0; }
+    .avatar:hover { transform: translateY(-2px); z-index: 10; }
+
+    .avatar-more {
+      background: #21262d;
+      color: #6b7280;
+      font-size: 10px;
+    }
+
+    .names {
+      font-size: 11px;
+      color: #4b5563;
+      line-height: 1.5;
+    }
+
+    /* ── Empty ── */
+    .empty {
+      padding: 24px 0;
+      text-align: center;
+    }
+    .empty-icon { font-size: 28px; opacity: 0.35; margin-bottom: 8px; }
+    .empty-text { font-size: 13px; color: #374151; }
+
+    /* ── States ── */
+    .loading { padding: 24px 0; text-align: center; font-size: 13px; color: #374151; }
+    .err     { padding: 24px 0; text-align: center; font-size: 12px; color: #ef4444; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div id="root" class="loading">Connecting…</div>
+  </div>
+
+  <script type="module">
+    import {
+      WidgetApi,
+      WidgetApiToWidgetAction,
+      WidgetEventCapability,
+      EventDirection,
+    } from 'https://esm.sh/matrix-widget-api@1';
+
+    const CALL_TYPE   = 'org.matrix.msc3401.call.member';
+    const MEMBER_TYPE = 'm.room.member';
+    const NAME_TYPE   = 'm.room.name';
+
+    // Colour palette for initials avatars
+    const PALETTE = [
+      { bg: '#2a1f5e', fg: '#a89cf7' },
+      { bg: '#0f3d2a', fg: '#5ce0a8' },
+      { bg: '#4a1810', fg: '#f0a090' },
+      { bg: '#0a2a4a', fg: '#7ab8f5' },
+      { bg: '#3d2600', fg: '#f5c060' },
+      { bg: '#30104a', fg: '#d0a0f5' },
+      { bg: '#0a2a3a', fg: '#80c0f0' },
+      { bg: '#3a1a1a', fg: '#f09090' },
+    ];
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    function esc(s) {
+      return String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function colorFor(uid) {
+      let h = 5381;
+      for (let i = 0; i < uid.length; i++) h = (h * 33 ^ uid.charCodeAt(i)) >>> 0;
+      return PALETTE[h % PALETTE.length];
+    }
+
+    function initials(name) {
+      const w = name.trim().split(/\s+/);
+      return w.length >= 2
+        ? (w[0][0] + w[w.length - 1][0]).toUpperCase()
+        : name.slice(0, 2).toUpperCase();
+    }
+
+    function localpart(uid) { return uid.split(':')[0].replace('@', ''); }
+
+    function parseUserId(stateKey) {
+      if (!stateKey.startsWith('_@')) return stateKey;
+      const rest = stateKey.slice(1);
+      const ci = rest.indexOf(':');
+      if (ci < 0) return stateKey;
+      const ui = rest.indexOf('_', ci);
+      return ui < 0 ? rest : rest.slice(0, ui);
+    }
+
+    function fmtElapsed(startMs) {
+      const s = Math.floor((Date.now() - startMs) / 1000);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    }
+
+    // ── State ──────────────────────────────────────────────────────────────────
+
+    const devices = {};   // stateKey → userId
+    const dnames  = {};   // userId   → displayName
+    let roomName  = '';
+    let callStart = null;
+    let ticker    = null;
+
+    function activeUsers() {
+      const seen = new Set(), out = [];
+      for (const uid of Object.values(devices)) {
+        if (!seen.has(uid)) { seen.add(uid); out.push(uid); }
+      }
+      return out;
+    }
+
+    function applyCall(e) {
+      const uid = parseUserId(e.state_key);
+      if ((e.content || {}).application) devices[e.state_key] = uid;
+      else delete devices[e.state_key];
+    }
+
+    function applyMember(e) {
+      const dn = (e.content || {}).displayname;
+      if (dn) dnames[e.state_key] = dn;
+    }
+
+    function applyName(e) {
+      const n = (e.content || {}).name;
+      if (n) roomName = n;
+    }
+
+    // ── Render ─────────────────────────────────────────────────────────────────
+
+    function render() {
+      const root  = document.getElementById('root');
+      const users = activeUsers();
+
+      if (!users.length) {
+        if (ticker) { clearInterval(ticker); ticker = null; }
+        callStart = null;
+        root.innerHTML = `
+          <div class="empty">
+            <div class="empty-icon">📵</div>
+            <div class="empty-text">No active call</div>
+          </div>`;
+        return;
+      }
+
+      if (!callStart) callStart = Date.now();
+      if (!ticker) ticker = setInterval(render, 60_000);
+
+      const n     = users.length;
+      const shown = users.slice(0, 5);
+      const over  = n - shown.length;
+
+      const avatarHtml = shown.map(uid => {
+        const name = dnames[uid] || localpart(uid);
+        const c    = colorFor(uid);
+        return `<div class="avatar" style="background:${c.bg};color:${c.fg}" title="${esc(name)}">${esc(initials(name))}</div>`;
+      }).join('') + (over ? `<div class="avatar avatar-more">+${over}</div>` : '');
+
+      const nameList = users.map(uid => dnames[uid] || localpart(uid));
+      const nameStr  = nameList.length <= 3
+        ? nameList.join(', ')
+        : `${nameList.slice(0, 2).join(', ')} & ${nameList.length - 2} more`;
+
+      root.innerHTML = `
+        <div class="header">
+          <div class="dot"></div>
+          <span class="status-label">Live call</span>
+          <span class="elapsed">${fmtElapsed(callStart)}</span>
+        </div>
+        <div class="room-name">${esc(roomName || 'Call in progress')}</div>
+        <div class="pcount">${n} participant${n !== 1 ? 's' : ''}</div>
+        <div class="avatars">${avatarHtml}</div>
+        <div class="names">${esc(nameStr)}</div>`;
+    }
+
+    // ── Main ───────────────────────────────────────────────────────────────────
+
+    async function main() {
+      const widgetId = new URLSearchParams(location.search).get('widgetId');
+      if (!widgetId) {
+        document.getElementById('root').innerHTML =
+          '<div class="err">No widgetId — open this inside Element</div>';
+        return;
+      }
+
+      const api = new WidgetApi(widgetId);
+      api.start(); // MUST be before any await
+
+      // Real-time updates from the client
+      api.on(`action:${WidgetApiToWidgetAction.SendEvent}`, ev => {
+        ev.preventDefault();
+        const d = ev.detail.data;
+        if (d.type === CALL_TYPE)   { applyCall(d);   render(); }
+        if (d.type === MEMBER_TYPE) { applyMember(d); }
+        if (d.type === NAME_TYPE)   { applyName(d);   render(); }
+      });
+
+      // Request capabilities
+      await api.requestCapabilities([
+        WidgetEventCapability.forStateEvent(EventDirection.Receive, CALL_TYPE),
+        WidgetEventCapability.forStateEvent(EventDirection.Receive, MEMBER_TYPE),
+        WidgetEventCapability.forStateEvent(EventDirection.Receive, NAME_TYPE),
+      ]);
+
+      // Load initial state
+      const [callEvts, memberEvts, nameEvts] = await Promise.all([
+        api.readStateEvents(CALL_TYPE,   Number.MAX_SAFE_INTEGER, null),
+        api.readStateEvents(MEMBER_TYPE, Number.MAX_SAFE_INTEGER, null),
+        api.readStateEvents(NAME_TYPE,   Number.MAX_SAFE_INTEGER, null),
+      ]);
+
+      nameEvts.forEach(applyName);
+      memberEvts.forEach(applyMember);
+      callEvts.forEach(applyCall);
+      render();
+    }
+
+    main().catch(err => {
+      console.error(err);
+      document.getElementById('root').innerHTML =
+        `<div class="err">Error: ${esc(err.message)}</div>`;
+    });
+  </script>
+</body>
+</html>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -26,9 +27,11 @@ func main() {
 	username    := os.Getenv("BOT_USERNAME")
 	password    := os.Getenv("BOT_PASSWORD")
 	pickleKey   := os.Getenv("CALLBOT_PICKLE_KEY")
-	dbPath   := os.Getenv("CALLBOT_DB_PATH")
-	cfgPath  := os.Getenv("CONFIG_PATH")
-	logLevel := os.Getenv("LOG_LEVEL")
+	dbPath      := os.Getenv("CALLBOT_DB_PATH")
+	cfgPath     := os.Getenv("CONFIG_PATH")
+	logLevel    := os.Getenv("LOG_LEVEL")
+	widgetPort  := os.Getenv("WIDGET_PORT")
+	widgetDir   := os.Getenv("WIDGET_DIR")
 
 	switch {
 	case homeserver == "" || username == "" || password == "":
@@ -42,19 +45,21 @@ func main() {
 	if cfgPath != "" {
 		configPath = cfgPath
 	}
+	if widgetDir == "" {
+		widgetDir = "widget"
+	}
+
+	// widgetURL is the public HTTPS URL users' browsers load the widget from.
+	// Must be set if you intend to use !callbot widget.
+	widgetURL = os.Getenv("WIDGET_URL")
 
 	// Load persisted room config. Env vars act as a one-time bootstrap:
-	// if config.json exists its values take precedence.
+	// if config.json exists its value takes precedence.
 	cfg := loadConfig()
 	if cfg.WatchedRoom != "" {
 		watchedRoom = cfg.WatchedRoom
 	} else {
 		watchedRoom = id.RoomID(os.Getenv("WATCHED_ROOM_ID"))
-	}
-	if cfg.AnnounceRoom != "" {
-		announceRoom = cfg.AnnounceRoom
-	} else {
-		announceRoom = id.RoomID(os.Getenv("ANNOUNCE_ROOM_ID"))
 	}
 
 	botUserID = id.UserID(username)
@@ -84,9 +89,8 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to create crypto helper:", err)
 	}
-	// LoginAs lets cryptohelper manage the device lifecycle — creates/reuses a device,
-	// uploads E2EE keys, and persists the access token in the db so re-login only
-	// happens when credentials are missing.
+	// LoginAs lets cryptohelper manage the device lifecycle — creates/reuses a
+	// device, uploads E2EE keys, and persists credentials in the db.
 	cryptoHelper.LoginAs = &mautrix.ReqLogin{
 		Type:                     mautrix.AuthTypePassword,
 		Identifier:               mautrix.UserIdentifier{Type: mautrix.IdentifierTypeUser, User: botUserID.Localpart()},
@@ -98,6 +102,18 @@ func main() {
 
 	if err = cryptoHelper.Init(mainCtx); err != nil {
 		log.Fatal("Failed to init crypto:", err)
+	}
+
+	// Serve widget files over HTTP if WIDGET_PORT is set.
+	// Put a reverse proxy (nginx/traefik) in front for HTTPS.
+	if widgetPort != "" {
+		go func() {
+			fs := http.FileServer(http.Dir(widgetDir))
+			zlog.Info().Str("port", widgetPort).Str("dir", widgetDir).Msg("Serving widget")
+			if err := http.ListenAndServe(":"+widgetPort, fs); err != nil {
+				zlog.Error().Err(err).Msg("Widget HTTP server error")
+			}
+		}()
 	}
 
 	syncer := client.Syncer.(*mautrix.DefaultSyncer)
@@ -121,64 +137,26 @@ func main() {
 	syncer.OnEventType(event.Type{Type: "org.matrix.msc4075.call.notify", Class: event.MessageEventType}, noop)
 	syncer.OnEventType(event.Type{Type: "org.matrix.msc4075.rtc.notification", Class: event.MessageEventType}, noop)
 
-	// Commands: !callbot <status|watch|announce|help>
+	// Commands: !callbot <status|watch|widget|help>
 	syncer.OnEventType(event.EventMessage, handleCommand(zlog))
 
 	startTime = time.Now().UnixMilli()
 
-	for _, roomID := range []id.RoomID{watchedRoom, announceRoom} {
-		if roomID == "" {
-			continue
-		}
-		if _, err := client.JoinRoomByID(mainCtx, roomID); err != nil {
-			zlog.Error().Err(err).Str("room", roomID.String()).Msg("Could not join room")
+	if watchedRoom != "" {
+		if _, err := client.JoinRoomByID(mainCtx, watchedRoom); err != nil {
+			zlog.Error().Err(err).Str("room", watchedRoom.String()).Msg("Could not join watched room")
 		} else {
-			zlog.Info().Str("room", roomID.String()).Msg("Ensured membership")
+			zlog.Info().Str("room", watchedRoom.String()).Msg("Ensured membership")
 		}
+		bootstrapCallState(mainCtx, zlog)
 	}
 
-	// Bootstrap call state from the current room state so restarts during
-	// an active call don't leave the card stale.
-	bootstrapCallState(mainCtx, zlog)
-	if participants := uniqueParticipants(); len(participants) > 0 {
-		mu.Lock()
-		callActive = true
-		callStartedAt = time.Now()
-		lastParticipants = participants
-		callCtx, cancel := context.WithCancel(context.Background())
-		callCtxCancel = cancel
-		mu.Unlock()
-		go tickMinutely(callCtx)
-		zlog.Info().Int("participants", len(participants)).Msg("Active call detected on startup")
-		plain, html := buildCardHTML(mainCtx, participants, 0, false)
-		sendOrEditCard(mainCtx, plain, html)
-	}
-
-	// Graceful shutdown: on SIGTERM/SIGINT mark the call ended (if active)
-	// so the card is left in a clean state, then stop syncing.
+	// Graceful shutdown on SIGTERM/SIGINT.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigCh
 		zlog.Info().Msg("Shutting down...")
-
-		mu.Lock()
-		active := callActive
-		started := callStartedAt
-		saved := lastParticipants
-		callActive = false
-		if callCtxCancel != nil {
-			callCtxCancel()
-			callCtxCancel = nil
-		}
-		mu.Unlock()
-
-		if active && len(saved) > 0 {
-			duration := time.Since(started).Round(time.Second)
-			plain, html := buildCardHTML(context.Background(), saved, duration, true)
-			sendOrEditCard(context.Background(), plain, html)
-		}
-
 		cancelMain()
 	}()
 

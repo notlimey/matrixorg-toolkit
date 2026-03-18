@@ -25,12 +25,16 @@ WORKDIR /app
 RUN mkdir /data && chown callbot:callbot /data
 
 COPY --from=builder /callbot /app/callbot
+COPY widget /app/widget
 
 USER callbot
 
 ENV CALLBOT_DB_PATH=/data/callbot.db \
-    CONFIG_PATH=/data/config.json
+    CONFIG_PATH=/data/config.json \
+    WIDGET_DIR=/app/widget
 
 VOLUME ["/data"]
+
+EXPOSE 8080
 
 ENTRYPOINT ["/app/callbot"]

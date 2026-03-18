@@ -12,19 +12,19 @@ import (
 	"maunium.net/go/mautrix/id"
 )
 
-// CallMemberContent is the per-device call membership content (Element Call / MSC3401 format).
-// An active member has Application set; an empty content ({}) means the member left.
+// CallMemberContent is the per-device call membership content (Element Call / MSC3401).
+// Active member: Application is set. Left: empty content {}.
 type CallMemberContent struct {
 	Application string `json:"application"`
 	DeviceID    string `json:"device_id"`
 }
 
-// parseUserIDFromStateKey extracts the Matrix user ID from a call member state key.
+// parseUserIDFromStateKey extracts @user:server from a call member state key.
 // New per-device format: _@user:server_DEVICEID_m.call → @user:server
 // Legacy format: state key is the bare user ID.
 func parseUserIDFromStateKey(stateKey string) id.UserID {
 	if strings.HasPrefix(stateKey, "_@") {
-		rest := stateKey[1:] // strip leading _  →  @user:server_DEVICEID_m.call
+		rest := stateKey[1:]
 		colonIdx := strings.Index(rest, ":")
 		if colonIdx < 0 {
 			return ""
@@ -39,8 +39,7 @@ func parseUserIDFromStateKey(stateKey string) id.UserID {
 }
 
 // bootstrapCallState queries the current room state to populate activeDevices
-// before the sync loop starts. This ensures restarts during an active call
-// don't lose track of who is already in the call.
+// before the sync loop starts, so restarts during an active call stay accurate.
 func bootstrapCallState(ctx context.Context, zlog zerolog.Logger) {
 	stateMap, err := client.State(ctx, watchedRoom)
 	if err != nil {
@@ -63,6 +62,10 @@ func bootstrapCallState(ctx context.Context, zlog zerolog.Logger) {
 			json.Unmarshal(raw, &content)
 			if content.Application != "" {
 				activeDevices[stateKey] = userID
+				if !callActive {
+					callActive = true
+					callStartedAt = time.Now()
+				}
 				zlog.Info().Str("user", string(userID)).Str("device", content.DeviceID).Msg("bootstrap: active in call")
 			}
 		}
@@ -73,7 +76,7 @@ func handleCallMember(ctx context.Context, evt *event.Event) {
 	if evt.RoomID != watchedRoom {
 		return
 	}
-	// Ignore historical timeline events from before the bot started.
+	// Ignore historical timeline events replayed during initial sync.
 	if evt.Timestamp < startTime {
 		return
 	}
@@ -88,7 +91,6 @@ func handleCallMember(ctx context.Context, evt *event.Event) {
 	var content CallMemberContent
 	json.Unmarshal(raw, &content)
 
-	// Non-empty application = active; empty content ({}) = left.
 	isActive := content.Application != ""
 
 	mu.Lock()
@@ -99,14 +101,19 @@ func handleCallMember(ctx context.Context, evt *event.Event) {
 	}
 	if isActive {
 		activeDevices[stateKey] = userID
+		if !callActive {
+			callActive = true
+			callStartedAt = time.Now()
+		}
 		log.Printf("joined: %s (device %s)", userID, content.DeviceID)
 	} else {
 		delete(activeDevices, stateKey)
 		log.Printf("left: %s", userID)
+		if len(activeDevices) == 0 {
+			callActive = false
+		}
 	}
 	mu.Unlock()
-
-	updateAnnouncement(ctx)
 }
 
 func uniqueParticipants() []id.UserID {
@@ -121,68 +128,4 @@ func uniqueParticipants() []id.UserID {
 		users = append(users, uid)
 	}
 	return users
-}
-
-func updateAnnouncement(ctx context.Context) {
-	participants := uniqueParticipants()
-
-	if len(participants) == 0 {
-		mu.Lock()
-		wasActive := callActive
-		started := callStartedAt
-		saved := lastParticipants
-		callActive = false
-		if callCtxCancel != nil {
-			callCtxCancel()
-			callCtxCancel = nil
-		}
-		mu.Unlock()
-
-		if wasActive {
-			duration := time.Since(started).Round(time.Second)
-			plain, html := buildCardHTML(ctx, saved, duration, true)
-			sendOrEditCard(ctx, plain, html)
-			mu.Lock()
-			announceMsgID = ""
-			mu.Unlock()
-		}
-		return
-	}
-
-	mu.Lock()
-	lastParticipants = participants
-	if !callActive {
-		callActive = true
-		callStartedAt = time.Now()
-		callCtx, cancel := context.WithCancel(context.Background())
-		callCtxCancel = cancel
-		go tickMinutely(callCtx)
-	}
-	elapsed := time.Since(callStartedAt).Round(time.Second)
-	mu.Unlock()
-
-	plain, html := buildCardHTML(ctx, participants, elapsed, false)
-	sendOrEditCard(ctx, plain, html)
-}
-
-// tickMinutely edits the card every minute while a call is active.
-func tickMinutely(ctx context.Context) {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			participants := uniqueParticipants()
-			if len(participants) == 0 {
-				return
-			}
-			mu.Lock()
-			elapsed := time.Since(callStartedAt).Round(time.Second)
-			mu.Unlock()
-			plain, html := buildCardHTML(ctx, participants, elapsed, false)
-			sendOrEditCard(ctx, plain, html)
-		}
-	}
 }
