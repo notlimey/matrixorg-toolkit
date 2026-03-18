@@ -1,0 +1,7 @@
+.env
+callbot
+*.log
+callbot.db
+callbot.db-shm
+callbot.db-wal
+config.json
