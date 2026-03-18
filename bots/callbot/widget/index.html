@@ -4,14 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Call Status</title>
+  <script src="widget-api.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    body {
+    html, body {
       background: #0d0f14;
+      min-height: 100%;
+    }
+
+    body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       padding: 14px;
-      min-height: 100vh;
     }
 
     .card {
@@ -121,8 +125,7 @@
     .empty-icon { font-size: 28px; opacity: 0.35; margin-bottom: 8px; }
     .empty-text { font-size: 13px; color: #374151; }
 
-    /* ── States ── */
-    .loading { padding: 24px 0; text-align: center; font-size: 13px; color: #374151; }
+    .loading { padding: 24px 0; text-align: center; font-size: 13px; color: #6b7280; }
     .err     { padding: 24px 0; text-align: center; font-size: 12px; color: #ef4444; }
   </style>
 </head>
@@ -131,19 +134,18 @@
     <div id="root" class="loading">Connecting…</div>
   </div>
 
-  <script type="module">
-    import {
+  <script>
+    const {
       WidgetApi,
       WidgetApiToWidgetAction,
       WidgetEventCapability,
       EventDirection,
-    } from 'https://esm.sh/matrix-widget-api@1';
+    } = mxwidgets;
 
     const CALL_TYPE   = 'org.matrix.msc3401.call.member';
     const MEMBER_TYPE = 'm.room.member';
     const NAME_TYPE   = 'm.room.name';
 
-    // Colour palette for initials avatars
     const PALETTE = [
       { bg: '#2a1f5e', fg: '#a89cf7' },
       { bg: '#0f3d2a', fg: '#5ce0a8' },
@@ -196,8 +198,8 @@
 
     // ── State ──────────────────────────────────────────────────────────────────
 
-    const devices = {};   // stateKey → userId
-    const dnames  = {};   // userId   → displayName
+    const devices = {};
+    const dnames  = {};
     let roomName  = '';
     let callStart = null;
     let ticker    = null;
@@ -286,7 +288,6 @@
       const api = new WidgetApi(widgetId);
       api.start(); // MUST be before any await
 
-      // Real-time updates from the client
       api.on(`action:${WidgetApiToWidgetAction.SendEvent}`, ev => {
         ev.preventDefault();
         const d = ev.detail.data;
@@ -295,14 +296,12 @@
         if (d.type === NAME_TYPE)   { applyName(d);   render(); }
       });
 
-      // Request capabilities
       await api.requestCapabilities([
         WidgetEventCapability.forStateEvent(EventDirection.Receive, CALL_TYPE),
         WidgetEventCapability.forStateEvent(EventDirection.Receive, MEMBER_TYPE),
         WidgetEventCapability.forStateEvent(EventDirection.Receive, NAME_TYPE),
       ]);
 
-      // Load initial state
       const [callEvts, memberEvts, nameEvts] = await Promise.all([
         api.readStateEvents(CALL_TYPE,   Number.MAX_SAFE_INTEGER, null),
         api.readStateEvents(MEMBER_TYPE, Number.MAX_SAFE_INTEGER, null),

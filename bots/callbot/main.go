@@ -109,8 +109,15 @@ func main() {
 	if widgetPort != "" {
 		go func() {
 			fs := http.FileServer(http.Dir(widgetDir))
+			// Wrap with headers required for Matrix widget iframes.
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Frame-Options", "ALLOWALL")
+				w.Header().Set("Content-Security-Policy", "frame-ancestors *")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				fs.ServeHTTP(w, r)
+			})
 			zlog.Info().Str("port", widgetPort).Str("dir", widgetDir).Msg("Serving widget")
-			if err := http.ListenAndServe(":"+widgetPort, fs); err != nil {
+			if err := http.ListenAndServe(":"+widgetPort, handler); err != nil {
 				zlog.Error().Err(err).Msg("Widget HTTP server error")
 			}
 		}()
