@@ -22,7 +22,13 @@ func buildContent(plain, html string) event.MessageEventContent {
 func sendOrEditCard(ctx context.Context, plain, html string) {
 	mu.Lock()
 	msgID := announceMsgID
+	room := announceRoom
 	mu.Unlock()
+
+	if room == "" {
+		log.Printf("announce room not set — use '!callbot announce' to configure it")
+		return
+	}
 
 	content := buildContent(plain, html)
 

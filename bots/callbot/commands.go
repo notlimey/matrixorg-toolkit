@@ -69,11 +69,10 @@ func handleCommand(zlog zerolog.Logger) func(ctx context.Context, evt *event.Eve
 			}
 
 		case "announce":
-			if len(args) < 2 {
-				reply(ctx, evt.RoomID, "Usage: !callbot announce <roomID>")
-				return
+			newRoom := evt.RoomID // default: current room
+			if len(args) >= 2 {
+				newRoom = id.RoomID(args[1])
 			}
-			newRoom := id.RoomID(args[1])
 			if _, err := client.JoinRoomByID(ctx, newRoom); err != nil {
 				reply(ctx, evt.RoomID, fmt.Sprintf("❌ Could not join room: %v", err))
 				return
@@ -88,8 +87,8 @@ func handleCommand(zlog zerolog.Logger) func(ctx context.Context, evt *event.Eve
 		case "help", "h", "":
 			reply(ctx, evt.RoomID,
 				"!callbot status — current state\n"+
-					"!callbot watch <roomID> — change watched room\n"+
-					"!callbot announce <roomID> — change announce room\n"+
+					"!callbot watch [roomID] — watch a room (default: this room)\n"+
+					"!callbot announce [roomID] — post call cards here (default: this room)\n"+
 					"!callbot help — this message",
 			)
 
